@@ -49,4 +49,4 @@ $$ S_{t+\Delta t} = S_t \exp\left( \left(\mu_t - \frac{\sigma_t^2}{2}\right)\Del
 pip install streamlit numpy pandas matplotlib
 
 # 2. 로컬 웹 서버 실행
-streamlit run app.py
+streamlit run stock_generator.py
