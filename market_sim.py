@@ -17,12 +17,11 @@ class StepByStepMarketSim:
         np.fill_diagonal(corr_matrix, 1.0)
         self.L = np.linalg.cholesky(corr_matrix)
         
-        
         self.rng = np.random.default_rng(88) 
         self.comp_multipliers = self.rng.uniform(0.5, 1.5, n_companies) 
         
         self.prev_ret = np.zeros(n_companies)
-        self.current_var = np.full(n_companies, 0.00001 / (1 - 0.10 - 0.85))
+        self.current_var = None # GARCH 변동성 초기화 지연 (next_step에서 동적 처리)
 
     def next_step(self, 
                   unemp, gdp, int_r, inf, sent,
@@ -33,6 +32,11 @@ class StepByStepMarketSim:
                   lambda_jump, mu_jump, sigma_jump): # 점프-확산
         
         if self.current_step >= self.max_steps: return False 
+        
+        # GARCH 초기화 (첫 스텝에서 입력된 파라미터 기반으로 장기 평균 분산 할당)
+        if self.current_var is None:
+            calc_beta = 0.99 - alpha_garch if alpha_garch + beta_garch >= 1.0 else beta_garch
+            self.current_var = np.full(self.n_companies, omega / (1.0 - alpha_garch - calc_beta))
         
         # 기준에 소비심리 추가
         base = {"unemp": 3.0, "gdp": 3.0, "int": 2.0, "inf": 2.0, "sent": 50.0}
@@ -52,7 +56,6 @@ class StepByStepMarketSim:
         g_sent = (sent - base["sent"]) / 10.0 # 소비심리 중력
         
         # (3) 하이브리드 드리프트 합산
-        # Delta(뉴스 충격) + Gravity(구조적 중력)
         shock_effect = (w_s_unemp * d_unemp) + (w_s_gdp * d_gdp) + (w_s_int * d_int) + (w_s_inf * d_inf) + (w_s_sent * d_sent)
         gravity_effect = (w_g_unemp * g_unemp) + (w_g_gdp * g_gdp) + (w_g_int * g_int) + (w_g_inf * g_inf) + (w_g_sent * g_sent)
         
@@ -66,16 +69,18 @@ class StepByStepMarketSim:
         if unemp > thresh_unemp or inf > thresh_inf:
             current_sigma = np.minimum(current_sigma * 2.0, 3.0)
 
-        # (5) 기하학적 브라운 운동(GBM) 연속 항
+        # 머튼 모델 점프 보상항(Jump Compensator) 계산 - 동적 기댓값 보존 목적
+        jump_compensator = lambda_jump * (np.exp(mu_jump + 0.5 * sigma_jump**2) - 1.0)
+
+        # (5) 기하학적 브라운 운동(GBM) 연속 항 (보상항 차감)
         W = self.L.dot(self.rng.normal(0, 1, self.n_companies))
-        drift = (dynamic_mu - 0.5 * current_sigma**2) * (1/252)
+        drift = (dynamic_mu - 0.5 * current_sigma**2 - jump_compensator) * (1/252)
         shock = current_sigma * W * np.sqrt(1/252)
         
         # (6) 머튼의 점프-확산(Jump-Diffusion)
-        # 1년에 lambda_jump번 발생하는 희소한 확률을 일간(1/252)으로 환산하여 점프 발생 횟수 생성
         num_jumps = self.rng.poisson(lambda_jump / 252, self.n_companies)
-        # 점프가 발생한 종목에 한해, mu_jump를 중심으로 sigma_jump 크기의 갭(Gap) 충격 적용
-        jump_impact = self.rng.normal(mu_jump, sigma_jump, self.n_companies) * num_jumps
+        # 복수 점프 발생 시 수학적 분산 왜곡 방지 (k번 점프 -> mu*k, sigma*sqrt(k))
+        jump_impact = self.rng.normal(mu_jump * num_jumps, sigma_jump * np.sqrt(num_jumps), self.n_companies)
         
         # (7) 최종 주가 : 드리프트 + 연속충격(GBM) + 단절충격(Jump)
         raw_prices = self.history_prices[-1] * np.exp(drift + shock + jump_impact)
